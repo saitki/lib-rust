@@ -8,6 +8,7 @@ members = [
     "crates/nfs-rpc",
     "crates/nfs-proto",
     "crates/nfs-client",
+    "crates/nfs-capi",
 ]
 # El crate de fuzzing usa libfuzzer (nightly) y se gestiona aparte con cargo-fuzz.
 exclude = ["fuzz"]

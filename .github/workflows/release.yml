@@ -1,0 +1,100 @@
+# Build y publicación de binarios en GitHub Releases.
+#
+# Se dispara al empujar un tag `vX.Y.Z`. Compila los ejemplos CLI (nfs-ls,
+# nfs-cp, nfs-cat, nfs-async-ls) con todas las features (TLS + tokio) para
+# Linux, macOS (x86_64 y arm64) y Windows, los empaqueta y los sube como
+# artefactos del workflow y como assets descargables del Release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Permite generar artefactos a demanda (sin crear Release) desde la UI.
+  workflow_dispatch:
+
+permissions:
+  contents: write # crear el Release y subir assets
+
+jobs:
+  build:
+    name: build-${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: ""
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Compilar librería nativa (C-API) y ejemplos
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p nfs-capi
+          cargo build --release --target ${{ matrix.target }} -p nfs-client --all-features --examples
+
+      - name: Empaquetar
+        shell: bash
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME:-dev}"
+          TARGET="${{ matrix.target }}"
+          EXT="${{ matrix.ext }}"
+          STAGING="libnfs-rs-${TAG}-${TARGET}"
+          REL="target/${TARGET}/release"
+          mkdir -p "$STAGING/bin" "$STAGING/lib" "$STAGING/include"
+          # Ejemplos CLI.
+          for bin in nfs-ls nfs-cp nfs-cat nfs-async-ls; do
+            cp "$REL/examples/${bin}${EXT}" "$STAGING/bin/"
+          done
+          # Librería nativa (el nombre depende de la plataforma).
+          for f in libnfs_client.so libnfs_client.dylib libnfs_client.a \
+                   nfs_client.dll nfs_client.dll.lib nfs_client.lib; do
+            cp "$REL/$f" "$STAGING/lib/" 2>/dev/null || true
+          done
+          cp crates/nfs-capi/include/nfs_client.h "$STAGING/include/"
+          cp README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md "$STAGING/" 2>/dev/null || true
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a "${STAGING}.zip" "$STAGING" >/dev/null
+            echo "ASSET=${STAGING}.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "${STAGING}.tar.gz" "$STAGING"
+            echo "ASSET=${STAGING}.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - name: Checksum
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null; then sha256sum "$ASSET" > "$ASSET.sha256";
+          else shasum -a 256 "$ASSET" > "$ASSET.sha256"; fi
+
+      - name: Subir como artefacto del workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+
+      - name: Adjuntar al Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+          generate_release_notes: true

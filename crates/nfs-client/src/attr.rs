@@ -68,6 +68,8 @@ pub struct Attr {
     pub used: u64,
     /// Identificador del fichero (inode).
     pub fileid: u64,
+    /// Identificador del sistema de ficheros (para detectar cruces de export).
+    pub fsid: u64,
     /// Dispositivo (major, minor).
     pub rdev: (u32, u32),
     /// Tiempo de último acceso.
@@ -104,6 +106,7 @@ impl Attr {
             size: a.size,
             used: a.used,
             fileid: a.fileid,
+            fsid: a.fsid,
             rdev: (a.rdev.specdata1, a.rdev.specdata2),
             atime: Timestamp {
                 secs: a.atime.seconds as i64,
@@ -132,16 +135,41 @@ impl Attr {
             file_type: a.ftype.map(FileType::from_nfs).unwrap_or(FileType::Unknown),
             mode: a.mode.unwrap_or(0),
             nlink: a.numlinks.unwrap_or(1),
-            uid: 0, // v4 usa owner string; el mapeo a uid numérico es de la Fase 5+
-            gid: 0,
+            uid: a.owner.as_deref().and_then(parse_id).unwrap_or(0),
+            gid: a.owner_group.as_deref().and_then(parse_id).unwrap_or(0),
             size: a.size.unwrap_or(0),
             used: a.space_used.unwrap_or(0),
             fileid: a.fileid.unwrap_or(0),
+            fsid: a.fsid.map(|(major, _)| major).unwrap_or(0),
             rdev: a.rawdev.unwrap_or((0, 0)),
             atime: ts(a.time_access),
             mtime: ts(a.time_modify),
             ctime: ts(a.time_metadata),
         }
+    }
+}
+
+/// Mapea un identificador NFSv4 (`owner`/`owner_group`) a un id numérico.
+///
+/// Muchos servidores (p. ej. knfsd sin idmapd) devuelven el número como cadena
+/// (`"1000"`); otros usan `nombre@dominio`. Aquí solo resolvemos el caso
+/// numérico (incluido `"1000@dominio"`); el mapeo por nombre requeriría idmapd.
+fn parse_id(value: &str) -> Option<u32> {
+    let numeric = value.split('@').next().unwrap_or(value);
+    numeric.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_id;
+
+    #[test]
+    fn idmap_numeric_and_domain() {
+        assert_eq!(parse_id("1000"), Some(1000));
+        assert_eq!(parse_id("0"), Some(0));
+        assert_eq!(parse_id("1000@dominio.local"), Some(1000));
+        assert_eq!(parse_id("root@dominio"), None);
+        assert_eq!(parse_id("nobody"), None);
     }
 }
 

@@ -20,6 +20,27 @@ pub struct OpenFile {
     pub writable: bool,
 }
 
+/// Testigo de un bloqueo activo, devuelto por `lock` y consumido por `unlock`.
+#[derive(Debug, Clone)]
+pub enum LockToken {
+    /// Bloqueo NFSv3 (NLM): basta el rango (el fh/owner los tiene el backend).
+    V3 {
+        /// Desplazamiento bloqueado.
+        offset: u64,
+        /// Longitud bloqueada.
+        length: u64,
+    },
+    /// Bloqueo NFSv4: stateid del bloqueo + rango.
+    V4 {
+        /// Concesión devuelta por `LOCK`.
+        grant: nfs_proto::nfs4::LockGrant,
+        /// Desplazamiento bloqueado.
+        offset: u64,
+        /// Longitud bloqueada.
+        length: u64,
+    },
+}
+
 /// Opciones de apertura.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenOpts {
@@ -90,6 +111,25 @@ pub trait Backend: Send {
     fn statvfs(&mut self, fh: &ObjId) -> Result<StatVfs, NfsError>;
     /// Comprueba permisos; devuelve la máscara concedida.
     fn access(&mut self, fh: &ObjId, mask: u32) -> Result<u32, NfsError>;
+
+    /// Toma un bloqueo byte-range sobre un fichero abierto.
+    fn lock(
+        &mut self,
+        file: &OpenFile,
+        offset: u64,
+        length: u64,
+        exclusive: bool,
+    ) -> Result<LockToken, NfsError>;
+    /// Libera un bloqueo previamente tomado.
+    fn unlock(&mut self, file: &OpenFile, token: &LockToken) -> Result<(), NfsError>;
+    /// Comprueba si un bloqueo se podría conceder (`true` = disponible).
+    fn test_lock(
+        &mut self,
+        file: &OpenFile,
+        offset: u64,
+        length: u64,
+        exclusive: bool,
+    ) -> Result<bool, NfsError>;
 }
 
 /// Acota un tamaño preferido de read/write a un rango razonable.

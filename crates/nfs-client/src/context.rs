@@ -10,8 +10,8 @@ use nfs_proto::nfs4::Nfs4;
 use nfs_proto::{Bytes, Credentials, Protocol};
 
 use crate::attr::{Attr, DirEntry, SetAttr, StatVfs};
-use crate::backend::{Backend, ObjId, OpenFile, OpenOpts};
-use crate::backend_v3::V3Backend;
+use crate::backend::{Backend, LockToken, ObjId, OpenFile, OpenOpts};
+use crate::backend_v3::{NlmConfig, V3Backend};
 use crate::backend_v4::V4Backend;
 use crate::error::NfsError;
 use crate::url::NfsUrl;
@@ -63,6 +63,13 @@ pub struct NfsFile {
     inner: OpenFile,
 }
 
+/// Testigo de un bloqueo activo; se devuelve a [`NfsContext::unlock`] para
+/// liberarlo.
+#[derive(Debug, Clone)]
+pub struct LockHandle {
+    token: LockToken,
+}
+
 /// Contexto de cliente NFS montado sobre un export.
 pub struct NfsContext {
     backend: Box<dyn Backend>,
@@ -104,8 +111,21 @@ impl NfsContext {
             ..MountOptions::default()
         };
         let info = connect::mount(&url.server, &url.path, &opts)?;
-        let nfs = Nfs3::connect(info.server, info.nfs_port, cred, Protocol::Tcp, timeout)?;
-        let backend = V3Backend::new(nfs, &info.root_fh)?;
+        let nfs = Nfs3::connect(
+            info.server,
+            info.nfs_port,
+            cred.clone(),
+            Protocol::Tcp,
+            timeout,
+        )?;
+        let nlm_config = NlmConfig {
+            server: info.server,
+            protocol: Protocol::Tcp,
+            cred,
+            timeout,
+            portmap_port: connect::PORTMAP_PORT,
+        };
+        let backend = V3Backend::new(nfs, &info.root_fh, nlm_config)?;
         Ok(Self {
             backend: Box::new(backend),
             root: info.root_fh,
@@ -115,7 +135,7 @@ impl NfsContext {
     fn mount_v4(url: &NfsUrl, cred: Credentials, timeout: Duration) -> Result<Self, NfsError> {
         let port = url.nfsport.unwrap_or(connect::NFS_PORT);
         let ip = resolve_ip(&url.server, port)?;
-        let mut nfs = Nfs4::connect(ip, port, cred, Protocol::Tcp, timeout)?;
+        let mut nfs = connect_v4(ip, port, cred, timeout, url)?;
         // El export es una ruta dentro del pseudo-sistema de ficheros v4.
         let mut root = nfs.root_fh()?;
         for comp in split_components(&url.path) {
@@ -397,6 +417,84 @@ impl NfsContext {
         let fh = self.resolve(path, true)?;
         self.backend.statvfs(&fh)
     }
+
+    // --- Bloqueos byte-range (fcntl) ----------------------------------------
+
+    /// Toma un bloqueo byte-range sobre un fichero abierto. Usa NLM en NFSv3 y
+    /// `LOCK` en NFSv4. Devuelve `Err(NfsError::Locked)` si hay conflicto.
+    pub fn lock(
+        &mut self,
+        file: &NfsFile,
+        offset: u64,
+        length: u64,
+        exclusive: bool,
+    ) -> Result<LockHandle, NfsError> {
+        let token = self.backend.lock(&file.inner, offset, length, exclusive)?;
+        Ok(LockHandle { token })
+    }
+
+    /// Libera un bloqueo tomado con [`NfsContext::lock`].
+    pub fn unlock(&mut self, file: &NfsFile, lock: LockHandle) -> Result<(), NfsError> {
+        self.backend.unlock(&file.inner, &lock.token)
+    }
+
+    /// Comprueba si un bloqueo se podría conceder (`true` = disponible).
+    pub fn test_lock(
+        &mut self,
+        file: &NfsFile,
+        offset: u64,
+        length: u64,
+        exclusive: bool,
+    ) -> Result<bool, NfsError> {
+        self.backend
+            .test_lock(&file.inner, offset, length, exclusive)
+    }
+}
+
+/// Conecta el cliente NFSv4 (con TLS si la URL lo pide y la feature está activa).
+fn connect_v4(
+    ip: IpAddr,
+    port: u16,
+    cred: Credentials,
+    timeout: Duration,
+    url: &NfsUrl,
+) -> Result<Nfs4, NfsError> {
+    if url.tls {
+        #[cfg(feature = "tls")]
+        {
+            let params = if url.tls_insecure {
+                nfs_rpc::TlsParams::insecure(url.server.clone())
+            } else {
+                // Montaje por URL: validación con las raíces del sistema operativo
+                // pendiente; por ahora sin mTLS (usar la API si se requiere).
+                nfs_rpc::TlsParams::with_roots(url.server.clone(), Vec::new())
+            };
+            let rpc = nfs_rpc::RpcClient::connect_tls(
+                SocketAddr::new(ip, port),
+                nfs_proto::nfs4::PROGRAM,
+                nfs_proto::nfs4::VERSION4,
+                cred,
+                timeout,
+                &params,
+            )?;
+            return Ok(Nfs4::from_client(rpc, url.minorversion)?);
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            let _ = (ip, port, &cred, timeout);
+            return Err(NfsError::InvalidUrl(
+                "TLS solicitado pero la feature `tls` no está activada".to_string(),
+            ));
+        }
+    }
+    Ok(Nfs4::connect_minor(
+        ip,
+        port,
+        cred,
+        Protocol::Tcp,
+        timeout,
+        url.minorversion,
+    )?)
 }
 
 /// Divide una ruta en componentes no vacíos (ignora `/` repetidos y vacíos).

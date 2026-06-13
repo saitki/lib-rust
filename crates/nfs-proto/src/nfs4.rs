@@ -32,6 +32,9 @@ const OP_CREATE: u32 = 6;
 const OP_GETATTR: u32 = 9;
 const OP_GETFH: u32 = 10;
 const OP_LINK: u32 = 11;
+const OP_LOCK: u32 = 12;
+const OP_LOCKT: u32 = 13;
+const OP_LOCKU: u32 = 14;
 const OP_LOOKUP: u32 = 15;
 const OP_OPEN: u32 = 18;
 const OP_OPEN_CONFIRM: u32 = 20;
@@ -48,6 +51,12 @@ const OP_SETATTR: u32 = 34;
 const OP_SETCLIENTID: u32 = 35;
 const OP_SETCLIENTID_CONFIRM: u32 = 36;
 const OP_WRITE: u32 = 38;
+// NFSv4.1 (minorversion 1)
+const OP_EXCHANGE_ID: u32 = 42;
+const OP_CREATE_SESSION: u32 = 43;
+const OP_DESTROY_SESSION: u32 = 44;
+const OP_SEQUENCE: u32 = 53;
+const OP_RECLAIM_COMPLETE: u32 = 58;
 
 // --- nfsstat4 (subconjunto) --------------------------------------------------
 
@@ -75,6 +84,13 @@ pub const NFS4ERR_DELAY: u32 = 10008;
 pub const NFS4ERR_STALE_CLIENTID: u32 = 10022;
 /// seqid de open_owner incorrecto.
 pub const NFS4ERR_BAD_SEQID: u32 = 10026;
+/// Bloqueo denegado por conflicto (`LOCK`/`LOCKT`).
+pub const NFS4ERR_DENIED: u32 = 10010;
+
+/// Tipo de bloqueo de lectura (`READ_LT`).
+pub const READ_LT: u32 = 1;
+/// Tipo de bloqueo de escritura (`WRITE_LT`).
+pub const WRITE_LT: u32 = 2;
 
 // --- nfs_ftype4 --------------------------------------------------------------
 
@@ -558,6 +574,68 @@ impl Compound {
         Ok(self)
     }
 
+    /// `LOCK` con un lock_owner nuevo (`open_to_lock_owner4`).
+    #[allow(clippy::too_many_arguments)]
+    fn lock_new(
+        &mut self,
+        locktype: u32,
+        offset: u64,
+        length: u64,
+        open_seqid: u32,
+        open_stateid: &Stateid4,
+        lock_seqid: u32,
+        clientid: u64,
+        lock_owner: &Bytes,
+    ) -> Result<&mut Self, XdrError> {
+        self.op(OP_LOCK)?;
+        locktype.encode(&mut self.ops)?;
+        false.encode(&mut self.ops)?; // reclaim
+        offset.encode(&mut self.ops)?;
+        length.encode(&mut self.ops)?;
+        // locker4: new_lock_owner = TRUE -> open_to_lock_owner4
+        true.encode(&mut self.ops)?;
+        open_seqid.encode(&mut self.ops)?;
+        open_stateid.encode(&mut self.ops)?;
+        lock_seqid.encode(&mut self.ops)?;
+        clientid.encode(&mut self.ops)?;
+        lock_owner.encode(&mut self.ops)?;
+        Ok(self)
+    }
+
+    fn locku(
+        &mut self,
+        locktype: u32,
+        lock_seqid: u32,
+        lock_stateid: &Stateid4,
+        offset: u64,
+        length: u64,
+    ) -> Result<&mut Self, XdrError> {
+        self.op(OP_LOCKU)?;
+        locktype.encode(&mut self.ops)?;
+        lock_seqid.encode(&mut self.ops)?;
+        lock_stateid.encode(&mut self.ops)?;
+        offset.encode(&mut self.ops)?;
+        length.encode(&mut self.ops)?;
+        Ok(self)
+    }
+
+    fn lockt(
+        &mut self,
+        locktype: u32,
+        offset: u64,
+        length: u64,
+        clientid: u64,
+        lock_owner: &Bytes,
+    ) -> Result<&mut Self, XdrError> {
+        self.op(OP_LOCKT)?;
+        locktype.encode(&mut self.ops)?;
+        offset.encode(&mut self.ops)?;
+        length.encode(&mut self.ops)?;
+        clientid.encode(&mut self.ops)?;
+        lock_owner.encode(&mut self.ops)?;
+        Ok(self)
+    }
+
     fn setattr(&mut self, stateid: &Stateid4, attrs: &SetAttr4) -> Result<&mut Self, XdrError> {
         self.op(OP_SETATTR)?;
         stateid.encode(&mut self.ops)?;
@@ -657,11 +735,24 @@ pub struct Nfs4 {
     clientid: u64,
     owner: Bytes,
     open_seqid: u32,
+    lock_counter: u32,
+    /// Sessionid de NFSv4.1 (`None` en v4.0).
+    sessionid: Option<[u8; 16]>,
+    /// Sequenceid del slot 0 (NFSv4.1).
+    seq_id: u32,
+}
+
+/// Resultado de un `LOCK` concedido: stateid del bloqueo y tipo.
+#[derive(Clone, Debug)]
+pub struct LockGrant {
+    /// Stateid del bloqueo (para `LOCKU`).
+    pub stateid: Stateid4,
+    /// Tipo de bloqueo concedido.
+    pub locktype: u32,
 }
 
 impl Nfs4 {
-    /// Conecta al servicio NFSv4 de `server:port` (2049 por defecto) y realiza
-    /// el handshake `SETCLIENTID`/`SETCLIENTID_CONFIRM`.
+    /// Conecta al servicio NFSv4.0 de `server:port` (handshake `SETCLIENTID`).
     pub fn connect(
         server: IpAddr,
         port: u16,
@@ -669,16 +760,41 @@ impl Nfs4 {
         protocol: Protocol,
         timeout: Duration,
     ) -> Result<Self, ProtoError> {
+        Self::connect_minor(server, port, cred, protocol, timeout, 0)
+    }
+
+    /// Conecta seleccionando la minorversion (0 = v4.0, 1 = v4.1 con sesiones).
+    pub fn connect_minor(
+        server: IpAddr,
+        port: u16,
+        cred: Credentials,
+        protocol: Protocol,
+        timeout: Duration,
+        minor: u32,
+    ) -> Result<Self, ProtoError> {
         let addr = SocketAddr::new(server, port);
         let rpc = RpcClient::connect(addr, protocol, cred, timeout)?;
+        Self::from_client(rpc, minor)
+    }
+
+    /// Construye el cliente sobre un `RpcClient` ya conectado (p. ej. TLS) y
+    /// realiza el handshake según la minorversion.
+    pub fn from_client(rpc: RpcClient, minor: u32) -> Result<Self, ProtoError> {
         let mut client = Self {
             rpc,
-            minor: 0,
+            minor,
             clientid: 0,
             owner: unique_owner(),
             open_seqid: 0,
+            lock_counter: 0,
+            sessionid: None,
+            seq_id: 0,
         };
-        client.setclientid()?;
+        if minor >= 1 {
+            client.establish_session()?;
+        } else {
+            client.setclientid()?;
+        }
         Ok(client)
     }
 
@@ -687,12 +803,140 @@ impl Nfs4 {
         &mut self.rpc
     }
 
+    /// Ejecuta un COMPOUND. En v4.1 antepone `SEQUENCE` y consume su resultado.
     fn run(&mut self, c: &Compound) -> Result<CompoundReader, ProtoError> {
+        // `NFS4ERR_GRACE`/`NFS4ERR_DELAY` significan «nada se aplicó, reintenta»:
+        // reenviar el COMPOUND es seguro. Backoff exponencial acotado.
+        let mut delay = Duration::from_millis(100);
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            let args = self.assemble(c)?;
+            let reply: Bytes = self
+                .rpc
+                .call(PROGRAM, VERSION4, COMPOUND_PROC, &Raw(args))?;
+            match CompoundReader::parse(reply) {
+                Ok(mut reader) => {
+                    if self.minor >= 1 {
+                        // Consumir el resultado de SEQUENCE: sessionid + 5 u32.
+                        reader.begin_op(OP_SEQUENCE)?;
+                        let _sid: [u8; 16] = reader.decode()?;
+                        for _ in 0..5 {
+                            let _: u32 = reader.decode()?;
+                        }
+                    }
+                    return Ok(reader);
+                }
+                Err(ProtoError::Nfs4(code))
+                    if matches!(code, NFS4ERR_GRACE | NFS4ERR_DELAY) && attempts < 6 =>
+                {
+                    std::thread::sleep(delay);
+                    delay = (delay * 2).min(Duration::from_secs(2));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Ejecuta un COMPOUND sin envolver en `SEQUENCE` (para `EXCHANGE_ID` y
+    /// `CREATE_SESSION`, que establecen la sesión y no llevan SEQUENCE).
+    fn run_raw(&mut self, c: &Compound) -> Result<CompoundReader, ProtoError> {
         let args = c.finish(self.minor)?;
         let reply: Bytes = self
             .rpc
             .call(PROGRAM, VERSION4, COMPOUND_PROC, &Raw(args))?;
         CompoundReader::parse(reply)
+    }
+
+    /// Serializa el COMPOUND a enviar, anteponiendo `SEQUENCE` en v4.1.
+    fn assemble(&mut self, c: &Compound) -> Result<Bytes, ProtoError> {
+        if self.minor == 0 {
+            return Ok(c.finish(0)?);
+        }
+        let sessionid = self
+            .sessionid
+            .ok_or(ProtoError::Protocol("sesión NFSv4.1 no establecida"))?;
+        let seqid = self.seq_id;
+        self.seq_id = self.seq_id.wrapping_add(1);
+        let mut buf = BytesMut::new();
+        "".encode(&mut buf)?; // tag
+        self.minor.encode(&mut buf)?;
+        (c.nops + 1).encode(&mut buf)?;
+        // SEQUENCE: sessionid, seqid, slotid=0, highest_slotid=0, cachethis=false
+        OP_SEQUENCE.encode(&mut buf)?;
+        sessionid.encode(&mut buf)?;
+        seqid.encode(&mut buf)?;
+        0u32.encode(&mut buf)?;
+        0u32.encode(&mut buf)?;
+        false.encode(&mut buf)?;
+        buf.put_slice(&c.ops);
+        Ok(buf.freeze())
+    }
+
+    /// Handshake de NFSv4.1: `EXCHANGE_ID` → `CREATE_SESSION` → `RECLAIM_COMPLETE`.
+    fn establish_session(&mut self) -> Result<(), ProtoError> {
+        // EXCHANGE_ID (sin SEQUENCE).
+        let mut c = Compound::new();
+        c.op(OP_EXCHANGE_ID)?;
+        boot_verifier().encode(&mut c.ops)?; // co_verifier
+        self.owner.clone().encode(&mut c.ops)?; // co_ownerid
+        0u32.encode(&mut c.ops)?; // eia_flags
+        0u32.encode(&mut c.ops)?; // state_protect4_a = SP4_NONE
+        0u32.encode(&mut c.ops)?; // impl_id<> (vacío)
+        let mut r = self.run_raw(&c)?;
+        r.begin_op(OP_EXCHANGE_ID)?;
+        let clientid: u64 = r.decode()?;
+        let create_seqid: u32 = r.decode()?; // eir_sequenceid
+        let _flags: u32 = r.decode()?;
+        let _state_protect: u32 = r.decode()?; // SP4_NONE
+        let _server_minor_id: u64 = r.decode()?;
+        let _server_major_id = r.opaque(usize::MAX)?;
+        let _server_scope = r.opaque(usize::MAX)?;
+        let _impl_id_count: u32 = r.decode()?; // normalmente 0
+        self.clientid = clientid;
+
+        // CREATE_SESSION (sin SEQUENCE).
+        let mut c2 = Compound::new();
+        c2.op(OP_CREATE_SESSION)?;
+        clientid.encode(&mut c2.ops)?;
+        create_seqid.encode(&mut c2.ops)?; // csa_sequence
+        0u32.encode(&mut c2.ops)?; // csa_flags
+        encode_channel_attrs(&mut c2.ops)?; // fore
+        encode_channel_attrs(&mut c2.ops)?; // back
+        0u32.encode(&mut c2.ops)?; // cb_program
+        1u32.encode(&mut c2.ops)?; // csa_sec_parms<> : 1 entrada
+        0u32.encode(&mut c2.ops)?; // flavor AUTH_NONE (brazo void)
+        let mut r2 = self.run_raw(&c2)?;
+        r2.begin_op(OP_CREATE_SESSION)?;
+        let sessionid: [u8; 16] = r2.decode()?;
+        let csr_seq: u32 = r2.decode()?; // csr_sequence
+        let _csr_flags: u32 = r2.decode()?;
+        skip_channel_attrs(&mut r2)?; // fore
+        skip_channel_attrs(&mut r2)?; // back
+        self.sessionid = Some(sessionid);
+        self.seq_id = csr_seq;
+
+        // RECLAIM_COMPLETE (ya con SEQUENCE).
+        let mut c3 = Compound::new();
+        c3.op(OP_RECLAIM_COMPLETE)?;
+        false.encode(&mut c3.ops)?; // rca_one_fs
+        let mut r3 = self.run(&c3)?;
+        r3.begin_op(OP_RECLAIM_COMPLETE)?;
+        Ok(())
+    }
+
+    /// `DESTROY_SESSION` + `DESTROY_CLIENTID` (cierre ordenado de v4.1).
+    pub fn destroy_session(&mut self) -> Result<(), ProtoError> {
+        let Some(sessionid) = self.sessionid else {
+            return Ok(());
+        };
+        let mut c = Compound::new();
+        c.op(OP_DESTROY_SESSION)?;
+        sessionid.encode(&mut c.ops)?;
+        let mut r = self.run_raw(&c)?;
+        r.begin_op(OP_DESTROY_SESSION)?;
+        self.sessionid = None;
+        Ok(())
     }
 
     fn setclientid(&mut self) -> Result<(), ProtoError> {
@@ -863,6 +1107,92 @@ impl Nfs4 {
         let _stateid: Stateid4 = r.decode()?;
         self.open_seqid = self.open_seqid.wrapping_add(1);
         Ok(())
+    }
+
+    fn fresh_lock_owner(&mut self) -> Bytes {
+        self.lock_counter = self.lock_counter.wrapping_add(1);
+        let mut owner = self.owner.to_vec();
+        owner.extend_from_slice(format!(":lock:{}", self.lock_counter).as_bytes());
+        Bytes::from(owner)
+    }
+
+    /// `LOCK`: solicita un bloqueo byte-range sobre un fichero abierto. Crea un
+    /// lock_owner nuevo por bloqueo (un par LOCK/LOCKU por owner). Devuelve el
+    /// stateid del bloqueo; `Err(Nfs4(NFS4ERR_DENIED))` si hay conflicto.
+    pub fn lock(
+        &mut self,
+        fh: &NfsFh4,
+        open_stateid: &Stateid4,
+        offset: u64,
+        length: u64,
+        exclusive: bool,
+    ) -> Result<LockGrant, ProtoError> {
+        let locktype = if exclusive { WRITE_LT } else { READ_LT };
+        let lock_owner = self.fresh_lock_owner();
+        let open_seqid = self.open_seqid;
+        let clientid = self.clientid;
+        let mut c = Compound::new();
+        c.putfh(fh)?.lock_new(
+            locktype,
+            offset,
+            length,
+            open_seqid,
+            open_stateid,
+            0,
+            clientid,
+            &lock_owner,
+        )?;
+        let mut r = self.run(&c)?;
+        r.begin_op(OP_PUTFH)?;
+        r.begin_op(OP_LOCK)?;
+        let stateid: Stateid4 = r.decode()?;
+        // `open_to_lock_owner` consume un seqid del open_owner.
+        self.open_seqid = self.open_seqid.wrapping_add(1);
+        Ok(LockGrant { stateid, locktype })
+    }
+
+    /// `LOCKU`: libera el bloqueo concedido por [`Nfs4::lock`].
+    pub fn unlock(
+        &mut self,
+        fh: &NfsFh4,
+        grant: &LockGrant,
+        offset: u64,
+        length: u64,
+    ) -> Result<Stateid4, ProtoError> {
+        // El lock_owner se creó con LOCK (lock_seqid 0); este es su segundo uso.
+        let mut c = Compound::new();
+        c.putfh(fh)?
+            .locku(grant.locktype, 1, &grant.stateid, offset, length)?;
+        let mut r = self.run(&c)?;
+        r.begin_op(OP_PUTFH)?;
+        r.begin_op(OP_LOCKU)?;
+        r.decode()
+    }
+
+    /// `LOCKT`: comprueba si un bloqueo se podría conceder. `Ok(true)` si está
+    /// disponible, `Ok(false)` si hay un bloqueo en conflicto.
+    pub fn test_lock(
+        &mut self,
+        fh: &NfsFh4,
+        offset: u64,
+        length: u64,
+        exclusive: bool,
+    ) -> Result<bool, ProtoError> {
+        let locktype = if exclusive { WRITE_LT } else { READ_LT };
+        let lock_owner = self.fresh_lock_owner();
+        let clientid = self.clientid;
+        let mut c = Compound::new();
+        c.putfh(fh)?
+            .lockt(locktype, offset, length, clientid, &lock_owner)?;
+        match self.run(&c) {
+            Ok(mut r) => {
+                r.begin_op(OP_PUTFH)?;
+                r.begin_op(OP_LOCKT)?;
+                Ok(true)
+            }
+            Err(ProtoError::Nfs4(NFS4ERR_DENIED)) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// `READ` desde un fichero abierto.
@@ -1041,6 +1371,27 @@ impl Nfs4 {
     }
 }
 
+/// Codifica un `channel_attrs4` con valores por defecto (1 slot, 1 MiB).
+fn encode_channel_attrs(buf: &mut BytesMut) -> Result<(), XdrError> {
+    0u32.encode(buf)?; // ca_headerpad_size
+    1_048_576u32.encode(buf)?; // ca_maxrequestsize
+    1_048_576u32.encode(buf)?; // ca_maxresponsesize
+    0u32.encode(buf)?; // ca_maxresponsesize_cached
+    8u32.encode(buf)?; // ca_maxoperations
+    1u32.encode(buf)?; // ca_maxrequests (1 slot)
+    0u32.encode(buf)?; // ca_rdma_ird<> (vacío)
+    Ok(())
+}
+
+/// Descarta un `channel_attrs4` de la respuesta de `CREATE_SESSION`.
+fn skip_channel_attrs(r: &mut CompoundReader) -> Result<(), ProtoError> {
+    for _ in 0..6 {
+        let _: u32 = r.decode()?;
+    }
+    let _rdma_ird: Vec<u32> = r.decode()?;
+    Ok(())
+}
+
 fn boot_verifier() -> [u8; 8] {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1128,5 +1479,37 @@ mod tests {
     fn raw_appends_without_length_prefix() {
         let raw = Raw(Bytes::from_static(&[1, 2, 3, 4]));
         assert_eq!(&to_bytes(&raw).unwrap()[..], &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn lock_compound_layout() {
+        let mut c = Compound::new();
+        let stateid = Stateid4 {
+            seqid: 1,
+            other: [7u8; 12],
+        };
+        c.lock_new(
+            WRITE_LT,
+            0,
+            100,
+            5,
+            &stateid,
+            0,
+            0xABCD,
+            &Bytes::from_static(b"owner"),
+        )
+        .unwrap();
+        let bytes = c.finish(0).unwrap();
+        let mut b = bytes;
+        assert_eq!(String::decode(&mut b).unwrap(), ""); // tag
+        assert_eq!(u32::decode(&mut b).unwrap(), 0); // minor
+        assert_eq!(u32::decode(&mut b).unwrap(), 1); // nops
+        assert_eq!(u32::decode(&mut b).unwrap(), OP_LOCK);
+        assert_eq!(u32::decode(&mut b).unwrap(), WRITE_LT);
+        assert!(!bool::decode(&mut b).unwrap()); // reclaim
+        assert_eq!(u64::decode(&mut b).unwrap(), 0); // offset
+        assert_eq!(u64::decode(&mut b).unwrap(), 100); // length
+        assert!(bool::decode(&mut b).unwrap()); // new_lock_owner
+        assert_eq!(u32::decode(&mut b).unwrap(), 5); // open_seqid
     }
 }

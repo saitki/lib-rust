@@ -76,7 +76,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Tests de integración
         env:
+          # knfsd con fsid=0 hace que /export/test sea la pseudo-raíz de NFSv4,
+          # por eso las URLs v4/v4.1 usan la ruta "/".
           NFS_TEST_URL: nfs://127.0.0.1/export/test
+          NFS4_TEST_URL: nfs://127.0.0.1/?version=4
+          NFS41_TEST_URL: nfs://127.0.0.1/?version=4.1
+          NFS4_LOCK_TEST: 127.0.0.1:/
         # `--all-targets` excluye los doctests: los ejemplos ```ignore``` de la
         # documentación se ejecutarían con `--ignored` y no están pensados para
         # compilar. Los tests `#[ignore]` de integración viven en lib/tests.
@@ -119,3 +124,34 @@ jobs:
           for target in xdr_decode record_reassembler proto_decode; do
             cargo +nightly fuzz run "$target" -- -runs=100000 -max_total_time=60
           done
+
+  # Integración NFS-over-TLS (RFC 9289). Best-effort: requiere ktls-utils/tlshd
+  # y TLS de kernel, que no todos los runners soportan; no bloquea el CI.
+  integration-tls:
+    name: integration-tls
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configurar NFSv4 con xprtsec=tls
+        run: |
+          set -x
+          sudo apt-get update
+          sudo apt-get install -y nfs-kernel-server ktls-utils || true
+          sudo mkdir -p /export/test && sudo chmod 777 /export/test
+          # Certificado self-signed para el servidor.
+          sudo mkdir -p /etc/nfs.d
+          sudo openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -keyout /etc/nfs.d/tls.key -out /etc/nfs.d/tls.crt -subj "/CN=127.0.0.1" || true
+          echo "/export/test 127.0.0.1(rw,sync,no_subtree_check,no_root_squash,insecure,fsid=0,xprtsec=tls)" | sudo tee /etc/exports
+          # tlshd para el handshake TLS del kernel.
+          printf '[authenticate]\n[authenticate.client]\nx509.certificate=/etc/nfs.d/tls.crt\nx509.private_key=/etc/nfs.d/tls.key\n' | sudo tee /etc/tlshd.conf || true
+          sudo systemctl restart tlshd || sudo tlshd & true
+          sudo exportfs -ra || true
+          sudo systemctl restart nfs-kernel-server || true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: "Test VFS sobre TLS (self-signed, inseguro)"
+        env:
+          NFS4_TLS_TEST_URL: "nfs://127.0.0.1/?version=4&tls=1&tls_insecure=1"
+        run: cargo test -p nfs-client --features tls --test vfs_integration -- --ignored --nocapture

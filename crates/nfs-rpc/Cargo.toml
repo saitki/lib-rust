@@ -13,8 +13,12 @@ thiserror = { workspace = true }
 bytes = { workspace = true }
 nfs-xdr = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["net", "io-util", "time", "rt"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
+rustls-pki-types = { version = "1", optional = true }
 
 [features]
 default = []
 # Backend de transporte asíncrono basado en tokio.
 tokio = ["dep:tokio"]
+# Transporte TLS (RFC 9289): probe AUTH_TLS + STARTTLS sobre rustls.
+tls = ["dep:rustls", "dep:rustls-pki-types"]

@@ -4,7 +4,7 @@ Recreación en **Rust puro** de [libnfs](https://github.com/sahlberg/libnfs), el
 cliente NFS en espacio de usuario. Objetivo: 100% funcional y multiplataforma
 (**Windows, macOS y Linux**), con API síncrona y asíncrona.
 
-> Estado del proyecto y plan completo: [`ESTADO-FASES.md`](ESTADO-FASES.md).
+> Estado del proyecto y plan completo: [`docs/ESTADO-FASES.md`](docs/ESTADO-FASES.md).
 > Decisiones de arquitectura: [`docs/DECISIONES.md`](docs/DECISIONES.md).
 
 ## Workspace
@@ -43,6 +43,21 @@ let datos = nfs.read_whole("/dir/fichero.txt").await?;
 NFSv4: añade `?version=4` a la URL. Migración desde libnfs (C):
 [`docs/MIGRACION.md`](docs/MIGRACION.md). Interoperabilidad y portabilidad:
 [`docs/INTEROP.md`](docs/INTEROP.md).
+
+## Descargas
+
+Los binarios de los ejemplos CLI (`nfs-ls`, `nfs-cp`, `nfs-cat`, `nfs-async-ls`)
+se publican en cada *release* para **Linux**, **macOS** (x86_64 y arm64) y
+**Windows**, compilados con todas las features (incluido TLS). Descárgalos desde
+la pestaña **Releases** del repositorio (o como artefactos del workflow
+[`release.yml`](.github/workflows/release.yml), que también se puede lanzar a mano
+con *workflow_dispatch*).
+
+```sh
+# Ejemplo de uso de un binario descargado:
+./nfs-ls nfs://servidor/export /ruta
+./nfs-cat nfs://servidor/export /ruta/fichero.txt
+```
 
 ## Desarrollo
 

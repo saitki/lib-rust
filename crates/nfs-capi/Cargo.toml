@@ -1,0 +1,23 @@
+[package]
+name = "nfs-capi"
+description = "API C (FFI) sobre nfs-client: produce nfs_client.dll/.lib para consumir desde C/C++/Rust-FFI (p. ej. la app Tauri)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "nfs_client"
+# cdylib -> nfs_client.dll (+ import lib nfs_client.dll.lib); staticlib -> nfs_client.lib
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+nfs-client = { path = "../nfs-client", features = ["tls"] }
+serde_json = "1"
+
+[features]
+default = []
+# Activa también la API asíncrona de nfs-client (no usada por la capa C).
+tokio = ["nfs-client/tokio"]

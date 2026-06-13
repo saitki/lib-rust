@@ -30,6 +30,13 @@ fn run_sweep(url: &str) {
     assert_eq!(chunk.len(), 256);
     nfs.close(f).expect("close");
 
+    // Bloqueo byte-range (NLM en v3, LOCK en v4).
+    let wf = nfs.open(&file, OpenFlags::read_write()).expect("open rw");
+    assert!(nfs.test_lock(&wf, 0, 128, true).expect("test_lock libre"));
+    let handle = nfs.lock(&wf, 0, 128, true).expect("lock");
+    nfs.unlock(&wf, handle).expect("unlock");
+    nfs.close(wf).expect("close rw");
+
     // readdir contiene el fichero.
     let entries = nfs.readdir(base).expect("readdir");
     assert!(entries.iter().any(|e| e.name == "data.bin"));
@@ -78,6 +85,26 @@ fn vfs_sweep_v3() {
 fn vfs_sweep_v4() {
     let Ok(url) = std::env::var("NFS4_TEST_URL") else {
         eprintln!("NFS4_TEST_URL no definida; omitiendo");
+        return;
+    };
+    run_sweep(&url);
+}
+
+#[test]
+#[ignore = "requiere NFS41_TEST_URL y servidor NFSv4.1 real (CI)"]
+fn vfs_sweep_v41() {
+    let Ok(url) = std::env::var("NFS41_TEST_URL") else {
+        eprintln!("NFS41_TEST_URL no definida; omitiendo");
+        return;
+    };
+    run_sweep(&url);
+}
+
+#[test]
+#[ignore = "requiere NFS4_TLS_TEST_URL, feature `tls` y servidor NFS-over-TLS (CI)"]
+fn vfs_sweep_v4_tls() {
+    let Ok(url) = std::env::var("NFS4_TLS_TEST_URL") else {
+        eprintln!("NFS4_TLS_TEST_URL no definida; omitiendo");
         return;
     };
     run_sweep(&url);

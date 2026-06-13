@@ -1,4 +1,26 @@
+# Compilados de Rust
 /target
+/fuzz/target
+
+# Artefactos empaquetados (binarios y librerías generados; se publican en Releases)
+/dist
+/docs
+# Salidas de cargo-fuzz
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage
+/fuzz/Cargo.lock
+
+# Backups y temporales
 **/*.rs.bk
+*.orig
 Cargo.lock.bak
-docs/
+
+# Cruft de sistema operativo y editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.iml
+
+# Nota: Cargo.lock SÍ se versiona (el workspace produce binarios y la librería C).

@@ -33,6 +33,9 @@ mod record;
 #[cfg(feature = "tokio")]
 mod client_async;
 
+#[cfg(feature = "tls")]
+mod client_tls;
+
 pub use auth::{AuthSysParams, Credentials, AUTH_NONE, AUTH_SYS};
 pub use client::{Protocol, ReadWriteStream, RpcClient, DEFAULT_TIMEOUT};
 pub use error::RpcError;
@@ -41,6 +44,9 @@ pub use record::{frame, RecordReassembler, DEFAULT_MAX_RECORD};
 
 #[cfg(feature = "tokio")]
 pub use client_async::AsyncRpcClient;
+
+#[cfg(feature = "tls")]
+pub use client_tls::{TlsParams, AUTH_TLS};
 
 // Reexporta los tipos de buffer para que `nfs-proto` no dependa de `bytes`/
 // `nfs-xdr` solo para las firmas.

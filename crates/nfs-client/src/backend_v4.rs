@@ -7,7 +7,7 @@ use nfs_proto::nfs4::{
 use nfs_proto::Bytes;
 
 use crate::attr::{Attr, DirEntry, SetAttr, StatVfs};
-use crate::backend::{Backend, ObjId, OpenFile, OpenOpts};
+use crate::backend::{Backend, LockToken, ObjId, OpenFile, OpenOpts};
 use crate::error::NfsError;
 
 /// Backend que habla NFSv4.0.
@@ -189,5 +189,52 @@ impl Backend for V4Backend {
 
     fn access(&mut self, fh: &ObjId, mask: u32) -> Result<u32, NfsError> {
         Ok(self.nfs.access(&Self::fh(fh), mask)?)
+    }
+
+    fn lock(
+        &mut self,
+        file: &OpenFile,
+        offset: u64,
+        length: u64,
+        exclusive: bool,
+    ) -> Result<LockToken, NfsError> {
+        let open_stateid = file.stateid.unwrap_or_default();
+        let grant = self.nfs.lock(
+            &Self::fh(&file.fh),
+            &open_stateid,
+            offset,
+            length,
+            exclusive,
+        )?;
+        Ok(LockToken::V4 {
+            grant,
+            offset,
+            length,
+        })
+    }
+
+    fn unlock(&mut self, file: &OpenFile, token: &LockToken) -> Result<(), NfsError> {
+        if let LockToken::V4 {
+            grant,
+            offset,
+            length,
+        } = token
+        {
+            self.nfs
+                .unlock(&Self::fh(&file.fh), grant, *offset, *length)?;
+        }
+        Ok(())
+    }
+
+    fn test_lock(
+        &mut self,
+        file: &OpenFile,
+        offset: u64,
+        length: u64,
+        exclusive: bool,
+    ) -> Result<bool, NfsError> {
+        Ok(self
+            .nfs
+            .test_lock(&Self::fh(&file.fh), offset, length, exclusive)?)
     }
 }

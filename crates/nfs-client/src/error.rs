@@ -45,6 +45,9 @@ pub enum NfsError {
     /// Se superó el límite de enlaces simbólicos al resolver la ruta.
     #[error("demasiados enlaces simbólicos al resolver la ruta")]
     TooManySymlinks,
+    /// Un bloqueo está en conflicto con otro (lock denegado).
+    #[error("recurso bloqueado por otro cliente")]
+    Locked,
     /// La ruta es inválida (vacía o mal formada).
     #[error("ruta inválida: {0}")]
     InvalidPath(String),
@@ -59,12 +62,20 @@ pub enum NfsError {
     Proto(ProtoError),
 }
 
+impl From<nfs_rpc::RpcError> for NfsError {
+    fn from(err: nfs_rpc::RpcError) -> Self {
+        NfsError::from(ProtoError::from(err))
+    }
+}
+
 impl From<ProtoError> for NfsError {
     fn from(err: ProtoError) -> Self {
         match err {
             ProtoError::Nfs3(code) => from_nfsstat3(code),
             ProtoError::Nfs4(code) => from_nfsstat4(code),
             ProtoError::Io(e) => NfsError::Io(e),
+            // NLM4_DENIED = 1: bloqueo en conflicto.
+            ProtoError::Nlm(1) => NfsError::Locked,
             other => NfsError::Proto(other),
         }
     }
@@ -98,6 +109,7 @@ fn from_nfsstat4(code: u32) -> NfsError {
         NFS4ERR_NOTEMPTY => NfsError::NotEmpty,
         NFS4ERR_STALE => NfsError::Stale,
         NFS4ERR_INVAL => NfsError::InvalidArgument,
+        NFS4ERR_DENIED => NfsError::Locked,
         other => NfsError::Proto(ProtoError::Nfs4(other)),
     }
 }

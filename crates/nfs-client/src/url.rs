@@ -11,6 +11,8 @@ pub struct NfsUrl {
     pub path: String,
     /// Versión de NFS (3 por defecto).
     pub version: u32,
+    /// Minorversion de NFSv4 (0 = v4.0, 1 = v4.1). Solo aplica con `version=4`.
+    pub minorversion: u32,
     /// UID para AUTH_SYS.
     pub uid: u32,
     /// GID para AUTH_SYS.
@@ -23,6 +25,10 @@ pub struct NfsUrl {
     pub timeo: u64,
     /// Cruce automático de exports anidados.
     pub autotraverse: bool,
+    /// Usar transporte TLS (RFC 9289). Solo aplica a NFSv4.
+    pub tls: bool,
+    /// Aceptar certificados TLS inválidos (solo pruebas/self-signed).
+    pub tls_insecure: bool,
 }
 
 impl Default for NfsUrl {
@@ -31,14 +37,21 @@ impl Default for NfsUrl {
             server: String::new(),
             path: "/".to_string(),
             version: 3,
+            minorversion: 0,
             uid: 0,
             gid: 0,
             nfsport: None,
             mountport: None,
             timeo: 60,
             autotraverse: false,
+            tls: false,
+            tls_insecure: false,
         }
     }
+}
+
+fn parse_bool(value: &str) -> bool {
+    value != "0" && !value.eq_ignore_ascii_case("false")
 }
 
 impl NfsUrl {
@@ -91,16 +104,23 @@ impl NfsUrl {
                 let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
                 match key {
                     "version" | "vers" | "nfsvers" => {
-                        parsed.version = parse_u32(value, key)?;
+                        // Acepta "4" o "4.1" (versión.minorversion).
+                        if let Some((maj, min)) = value.split_once('.') {
+                            parsed.version = parse_u32(maj, key)?;
+                            parsed.minorversion = parse_u32(min, key)?;
+                        } else {
+                            parsed.version = parse_u32(value, key)?;
+                        }
                     }
+                    "minorversion" | "minor" => parsed.minorversion = parse_u32(value, key)?,
                     "uid" => parsed.uid = parse_u32(value, key)?,
                     "gid" => parsed.gid = parse_u32(value, key)?,
                     "nfsport" => parsed.nfsport = Some(parse_port(value)?),
                     "mountport" => parsed.mountport = Some(parse_port(value)?),
                     "timeo" => parsed.timeo = parse_u32(value, key)? as u64,
-                    "autotraverse" | "auto-traverse" => {
-                        parsed.autotraverse = value != "0" && !value.eq_ignore_ascii_case("false");
-                    }
+                    "autotraverse" | "auto-traverse" => parsed.autotraverse = parse_bool(value),
+                    "tls" | "xprtsec" => parsed.tls = parse_bool(value),
+                    "tls_insecure" | "tls-insecure" => parsed.tls_insecure = parse_bool(value),
                     // Parámetros conocidos pero aún no usados: se aceptan sin error.
                     "dircache" | "readahead" | "auto-mount" | "rsize" | "wsize" | "retrans" => {}
                     other => {
@@ -166,6 +186,16 @@ mod tests {
         assert_eq!(u.server, "nas.local");
         assert_eq!(u.nfsport, Some(20490));
         assert!(u.autotraverse);
+    }
+
+    #[test]
+    fn url_v41() {
+        let u = NfsUrl::parse("nfs://srv/export?version=4.1").unwrap();
+        assert_eq!(u.version, 4);
+        assert_eq!(u.minorversion, 1);
+        let u2 = NfsUrl::parse("nfs://srv/export?version=4&minorversion=1").unwrap();
+        assert_eq!(u2.version, 4);
+        assert_eq!(u2.minorversion, 1);
     }
 
     #[test]

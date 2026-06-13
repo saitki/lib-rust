@@ -29,7 +29,7 @@ mod url;
 mod async_context;
 
 pub use attr::{Attr, DirEntry, FileType, SetAttr, StatVfs, Timestamp};
-pub use context::{NfsContext, NfsFile, OpenFlags};
+pub use context::{LockHandle, NfsContext, NfsFile, OpenFlags};
 pub use error::NfsError;
 pub use url::NfsUrl;
 

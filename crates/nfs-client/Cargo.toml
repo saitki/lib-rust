@@ -22,5 +22,5 @@ tokio = { workspace = true, optional = true, features = ["net", "io-util", "time
 default = []
 # API asíncrona basada en tokio (además de la API síncrona, siempre disponible).
 tokio = ["dep:tokio", "nfs-rpc/tokio"]
-# Transporte TLS / mTLS (RFC 9289). Se implementa en la Fase 8.
-tls = []
+# Transporte TLS (RFC 9289) para NFSv4: probe AUTH_TLS + STARTTLS sobre rustls.
+tls = ["nfs-rpc/tls"]
