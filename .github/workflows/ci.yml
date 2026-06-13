@@ -77,7 +77,10 @@ jobs:
       - name: Tests de integración
         env:
           NFS_TEST_URL: nfs://127.0.0.1/export/test
-        run: cargo test --workspace --all-features -- --ignored --nocapture
+        # `--all-targets` excluye los doctests: los ejemplos ```ignore``` de la
+        # documentación se ejecutarían con `--ignored` y no están pensados para
+        # compilar. Los tests `#[ignore]` de integración viven en lib/tests.
+        run: cargo test --workspace --all-features --all-targets -- --ignored --nocapture
 
   # Integración contra el servidor NFS nativo de macOS (nfsd), solo v3.
   integration-macos:
@@ -99,7 +102,8 @@ jobs:
       - name: Tests de integración (v3)
         env:
           NFS_TEST_URL: nfs://127.0.0.1/tmp/nfsexport
-        run: cargo test --workspace -- --ignored --nocapture || true
+        # `--all-targets` excluye los doctests (ver nota en integration-linux).
+        run: cargo test --workspace --all-targets -- --ignored --nocapture || true
 
   # Compilación de los targets de fuzzing (smoke), y una ronda corta.
   fuzz:
