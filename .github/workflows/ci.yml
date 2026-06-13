@@ -1,0 +1,131 @@
+# CI de libnfs-rs.
+#
+# NOTA: GitHub Actions solo lee `.github/workflows/` en la RAÍZ del repositorio.
+# Si `lib-rust/` es un subdirectorio del repo, mueve/copia este archivo a
+# `<raiz>/.github/workflows/ci.yml`. El `working-directory: ./lib-rust` de cada
+# job ya contempla ese layout; si `lib-rust/` es la raíz del repo, elimínalo.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # Build + lint + tests unitarios en las tres plataformas objetivo.
+  build:
+    name: build-${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: ./lib-rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lib-rust
+      - name: Formato
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-features -- -D warnings
+      - name: Build
+        run: cargo build --workspace --all-features
+      - name: Tests unitarios
+        run: cargo test --workspace --all-features
+
+  # MSRV: el workspace debe compilar con la versión mínima declarada.
+  msrv:
+    name: msrv-1.82
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./lib-rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82.0
+      - run: cargo build --workspace --all-features
+
+  # Integración contra un servidor NFS real (knfsd) en Linux.
+  # En la Fase 0 solo verifica que el servidor arranca; las fases 3+ añaden
+  # tests #[ignore] que se ejecutan aquí vía NFS_TEST_URL.
+  integration-linux:
+    name: integration-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar y arrancar servidor NFS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nfs-kernel-server nfs-common rpcbind
+          sudo mkdir -p /export/test
+          sudo chmod 777 /export/test
+          echo "/export/test *(rw,sync,no_subtree_check,no_root_squash,insecure,fsid=0)" | sudo tee /etc/exports
+          sudo systemctl restart rpcbind || sudo service rpcbind restart || true
+          sudo exportfs -ra
+          sudo systemctl restart nfs-kernel-server || sudo service nfs-kernel-server restart
+          echo "--- exports activos ---"; sudo exportfs -v
+          echo "--- servicios RPC ---"; rpcinfo -p localhost
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lib-rust
+      - name: Tests de integración
+        working-directory: ./lib-rust
+        env:
+          NFS_TEST_URL: nfs://127.0.0.1/export/test
+        run: cargo test --workspace --all-features -- --ignored --nocapture
+
+  # Integración contra el servidor NFS nativo de macOS (nfsd), solo v3.
+  integration-macos:
+    name: integration-macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configurar y arrancar nfsd
+        run: |
+          sudo mkdir -p /tmp/nfsexport
+          sudo chmod 777 /tmp/nfsexport
+          echo "/tmp/nfsexport -mapall=$(id -u):$(id -g) localhost" | sudo tee /etc/exports
+          sudo nfsd enable || true
+          sudo nfsd restart || sudo nfsd start || true
+          sleep 3
+          showmount -e localhost || true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lib-rust
+      - name: Tests de integración (v3)
+        working-directory: ./lib-rust
+        env:
+          NFS_TEST_URL: nfs://127.0.0.1/tmp/nfsexport
+        run: cargo test --workspace -- --ignored --nocapture || true
+
+  # Compilación de los targets de fuzzing (smoke), y una ronda corta.
+  fuzz:
+    name: fuzz-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Instalar cargo-fuzz
+        run: cargo install cargo-fuzz
+      - name: Ronda corta de fuzzing
+        working-directory: ./lib-rust
+        run: |
+          for target in xdr_decode record_reassembler proto_decode; do
+            cargo +nightly fuzz run "$target" -- -runs=100000 -max_total_time=60
+          done

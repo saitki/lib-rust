@@ -1,0 +1,36 @@
+[package]
+name = "nfs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+nfs-xdr = { path = "../crates/nfs-xdr" }
+nfs-rpc = { path = "../crates/nfs-rpc" }
+nfs-proto = { path = "../crates/nfs-proto" }
+
+[[bin]]
+name = "xdr_decode"
+path = "fuzz_targets/xdr_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "record_reassembler"
+path = "fuzz_targets/record_reassembler.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto_decode"
+path = "fuzz_targets/proto_decode.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,15 @@
+[package]
+name = "nfs-proto"
+description = "Tipos de protocolo para libnfs-rs: PORTMAP, MOUNT, NFSv3, NFSv4, NLM, NSM, RQUOTA."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+bytes = { workspace = true }
+nfs-xdr = { workspace = true }
+nfs-rpc = { workspace = true }

@@ -1,0 +1,26 @@
+[package]
+name = "nfs-client"
+description = "Cliente NFS en Rust puro (recreación de libnfs): API VFS sync/async, URLs, multiplataforma."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+bytes = { workspace = true }
+nfs-xdr = { workspace = true }
+nfs-rpc = { workspace = true }
+nfs-proto = { workspace = true }
+tokio = { workspace = true, optional = true, features = ["net", "io-util", "time", "rt", "sync"] }
+
+[features]
+default = []
+# API asíncrona basada en tokio (además de la API síncrona, siempre disponible).
+tokio = ["dep:tokio", "nfs-rpc/tokio"]
+# Transporte TLS / mTLS (RFC 9289). Se implementa en la Fase 8.
+tls = []

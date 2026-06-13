@@ -1,0 +1,41 @@
+# Workspace raíz de libnfs-rs — recreación en Rust de libnfs.
+# Ver ESTADO-FASES.md para el plan por fases.
+[workspace]
+resolver = "2"
+members = [
+    "crates/nfs-xdr",
+    "crates/nfs-xdr-derive",
+    "crates/nfs-rpc",
+    "crates/nfs-proto",
+    "crates/nfs-client",
+]
+# El crate de fuzzing usa libfuzzer (nightly) y se gestiona aparte con cargo-fuzz.
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+authors = ["libnfs-rs contributors"]
+repository = "https://example.invalid/libnfs-rs"
+homepage = "https://example.invalid/libnfs-rs"
+keywords = ["nfs", "rpc", "xdr", "filesystem", "network"]
+categories = ["filesystem", "network-programming"]
+
+[workspace.dependencies]
+# Dependencias compartidas (versiones fijadas en un único sitio).
+thiserror = "2"
+bytes = "1"
+tokio = { version = "1", default-features = false }
+# Crates internos (referenciados por ruta + versión para poder publicar).
+nfs-xdr = { path = "crates/nfs-xdr", version = "0.0.1" }
+nfs-xdr-derive = { path = "crates/nfs-xdr-derive", version = "0.0.1" }
+nfs-rpc = { path = "crates/nfs-rpc", version = "0.0.1" }
+nfs-proto = { path = "crates/nfs-proto", version = "0.0.1" }
+# Dependencias de desarrollo compartidas.
+proptest = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
